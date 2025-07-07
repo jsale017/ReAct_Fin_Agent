@@ -9,6 +9,7 @@ from langgraph.prebuilt import ToolNode
 import os
 import requests
 from langchain_community.utilities import SerpAPIWrapper
+from db import FinancialAgentDB
 
 load_dotenv()
 
@@ -17,6 +18,8 @@ serpapi_key = os.getenv('SERPAPI_KEY')
 
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
+    user_id: int
+    user_email: str
 
 @tool
 def get_stock_data(symbol: str, alphavantagekey: str):
@@ -61,7 +64,52 @@ def get_income_statement(symbol: str, alphavantagekey: str):
     response = requests.get(url, params=params)
     return response.json()
 
-tools = [get_stock_data, get_balance_sheet, get_income_statement, web_search]
+@tool
+def get_user_favorites(user_id: int):
+    """FEtch the user's favorite stocks from the database."""
+    db = FinancialAgentDB()
+    favorites = db.get_user_favorites(user_id)
+    db.close()
+    return favorites
+
+@tool
+def add_favorite_stock(user_id: int, stock_symbol: str,
+                       price_threshold_low: float = None,
+                       price_threshold_high: float = None):
+    """Add a stock to the user's favorites in the database."""
+    db = FinancialAgentDB()
+    result = db.add_favorite_stock(user_id, stock_symbol, price_threshold_low, price_threshold_high)
+    db.close()
+    return {"success": result, "message": "Stock added to favorites." if result else "Failed to add stock to favorites."}
+
+@tool
+def remove_favorite_stock(user_id: int, stock_symbol: str):
+    """Remove a stock from the user's favorites in the db"""
+    db = FinancialAgentDB()
+    db.remove_favorite_stock(user_id, stock_symbol)
+    db.close()
+    return {"success": True, "message": f"Removed {stock_symbol} from favorites."}
+
+@tool
+def update_stock_thresholds(user_id: int, stock_symbol: str,
+                            price_threshold_low: float = None,
+                            price_threshold_high: float = None):
+    """Update price thresholds for a favorite stock."""
+    db = FinancialAgentDB()
+    db.update_thresholds(user_id, stock_symbol,
+                         price_threshold_low, price_threshold_high)
+    db.close()
+    return {"success": True, "message": f"Updated thresholds for {stock_symbol}"}
+
+@tool
+def get_query_history(user_id: int, limit: int = 10):
+    """Get the user's recent query history."""
+    db = FinancialAgentDB()
+    history = db.get_user_query_history(user_id, limit)
+    db.close()
+    return history
+
+tools = [get_stock_data, get_balance_sheet, get_income_statement, web_search, get_user_favorites, add_favorite_stock, remove_favorite_stock, update_stock_thresholds, get_query_history]
 
 model = ChatOpenAI(
     model='gpt-4o-mini',
@@ -71,7 +119,18 @@ model = ChatOpenAI(
 
 def model_call(state: AgentState) -> AgentState:
     system_prompt = SystemMessage(
-        content="You are a financial analysis assistant. You can fetch stock data, balance sheets, and income statements using the tools provided."
+        content=f"""You are a financial analysis assistant. You can fetch stock data, balance sheets, and income statements using the tools provided.
+        Current user email: {state.get('user_email')}
+        User ID: {state.get('user_id')}
+        
+        You can manage the user's favorite stocks:
+        - Add stocks to favorites (max 5) with optional price thresholds
+        - Remove stocks from favorites
+        - Update price thresholds for existing favorites
+        - View all favorite stocks
+        - Access query history
+        
+        Always use the user_id from the state when calling database tools."""
     )
     response = model.invoke([system_prompt] + state["messages"])
     return {"messages": [response]}
@@ -83,6 +142,21 @@ def should_continue(state: AgentState):
         return "end"
     else:
         return "continue"
+
+def authenticate_user():
+    """Get user email and create/retrieve user"""
+    email = input("Enter your email addess to continue: ").strip()
+    if not email or '@' not in email:
+        raise ValueError("Invalid email address.")
+        return None, None
+    
+    db = FinancialAgentDB()
+    db.setup_db()
+    user_id = db.create_user(email)
+    db.close()
+
+    print(f"Welcome! Your user ID is: {user_id}")
+    return user_id, email
 
 graph = StateGraph(AgentState)
 graph.add_node("Agent", model_call)
@@ -112,5 +186,64 @@ def print_stream(stream):
         else:
             message.pretty_print()
 
-inputs = {"messages": [("user", "What is the stock price of QQQ, the balance sheet of NVDIA, and the income statement of TSLA, and the latest stock news of American Airlines?")]}
-print_stream(app.stream(inputs, stream_mode="values"))
+def run_financial_agent(query: str, user_id: int, user_email: str):
+    """Run the agent with user context and database logging"""
+    db = FinancialAgentDB()
+    
+    # Log query
+    query_id = db.log_query(user_id, query)
+    
+    # Prepare inputs
+    inputs = {
+        "messages": [("user", query)],
+        "user_id": user_id,
+        "user_email": user_email
+    }
+    
+    # Track execution time
+    import time
+    start_time = time.time()
+    tools_used = []
+    response_text = ""
+    
+    # Run agent
+    for s in app.stream(inputs, stream_mode="values"):
+        message = s['messages'][-1]
+        if isinstance(message, tuple):
+            print(message)
+            response_text= str(message[1])
+        else:
+            message.pretty_print()
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                for tool_call in message.tool_calls:
+                    tools_used.append(tool_call['name'])
+            
+            if hasattr(message, 'content') and message.content:
+                response_text = message.content
+
+    execution_time = int((time.time() - start_time) * 1000)
+    db.log_response(query_id, response_text, tools_used, execution_time)
+
+    import re
+    stock_pattern = r'\b[A-Z]{1,5}\b'
+    potential_symols = re.findall(stock_pattern, query)
+    if potential_symols:
+        db.log_query_stocks(query_id, potential_symols)
+
+    db.close()
+
+if __name__ == "__main__":
+    user_id, user_email = authenticate_user()
+    if not user_id:
+        exit()
+    
+    query = input("\nWhat would you like to know about stocks? ")
+    
+    run_financial_agent(query, user_id, user_email)
+    
+    while True:
+        another = input("\nWould you like to ask another question? (y/n): ").lower()
+        if another != 'y':
+            break
+        query = input("\nWhat would you like to know? ")
+        run_financial_agent(query, user_id, user_email)
