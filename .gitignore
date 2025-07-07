@@ -1,0 +1,16 @@
+#all .env files
+.env
+#all .env files in subdirectories
+**/.env
+#all .env files in subdirectories, including nested ones
+**/.env.*
+#all .env files in subdirectories, including nested ones, with any extension
+**/.env.*
+#all .venv files in subdirectories, including nested ones, with any extension
+**/.venv.*
+#all .venv files in subdirectories, including nested ones, with any extension
+**/.venv
+#all .venv files in subdirectories, including nested ones, with any extension
+**/.venv.*
+#all .venv files in subdirectories, including nested ones, with any extension
+**/.venv.*
