@@ -10,12 +10,16 @@ import os
 import requests
 from langchain_community.utilities import SerpAPIWrapper
 from db import FinancialAgentDB
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 load_dotenv()
 
 alphavantagekey = os.getenv('ALPHAVANTAGE_API_KEY')
 serpapi_key = os.getenv('SERPAPI_KEY')
-
+gmail_user = os.getenv("EMAIL")
+gmail_password = os.getenv("PASSWORD")
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
     user_id: int
@@ -109,7 +113,31 @@ def get_query_history(user_id: int, limit: int = 10):
     db.close()
     return history
 
-tools = [get_stock_data, get_balance_sheet, get_income_statement, web_search, get_user_favorites, add_favorite_stock, remove_favorite_stock, update_stock_thresholds, get_query_history]
+@tool
+def send_email(recipient_email: str, subject: str, body: str):
+    """Send a email with financial information to the user"""
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = gmail_user
+        msg['To'] = recipient_email
+        msg['Subject'] = subject
+
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(gmail_user, gmail_password)
+        
+        # send the email
+        text = msg.as_string()
+        server.sendmail(gmail_user, recipient_email, text)
+        server.quit()
+
+        return {"success": True, "message": f"Email sent successfully to {recipient_email}."}
+    except Exception as e:
+        return {"success": False, "message": f"Failed to send email: {str(e)}"}
+
+tools = [get_stock_data, get_balance_sheet, get_income_statement, web_search, get_user_favorites, add_favorite_stock, remove_favorite_stock, update_stock_thresholds, get_query_history, send_email]
 
 model = ChatOpenAI(
     model='gpt-4o-mini',
@@ -130,6 +158,11 @@ def model_call(state: AgentState) -> AgentState:
         - View all favorite stocks
         - Access query history
         
+        You can also send financial information via email. When asked to send an email:
+        - Use the user's email from the state
+        - Create a clear subject and body
+        - Format the body with the requested financial information
+
         Always use the user_id from the state when calling database tools."""
     )
     response = model.invoke([system_prompt] + state["messages"])
