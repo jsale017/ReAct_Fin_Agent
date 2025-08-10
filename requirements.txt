@@ -5,3 +5,4 @@ langchain_openai
 langgraph
 langchain_community
 google-search-results
+schedule
